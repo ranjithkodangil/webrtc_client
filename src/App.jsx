@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
-import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video } from 'lucide-react';
+import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const SIGNAL_SERVER = 'http://webrtc-server-liard.vercel.app';
+const SIGNAL_SERVER = 'https://webrtc-server-liard.vercel.app';
+const MAX_PARTICIPANTS = 4;
 
 const App = () => {
   const [roomId, setRoomId] = useState('');
@@ -12,6 +13,10 @@ const App = () => {
   const [peers, setPeers] = useState({});
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [isInvited, setIsInvited] = useState(false);
+  const [error, setError] = useState('');
+  const [connectionStatus, setConnectionStatus] = useState('Disconnected');
 
   const socketRef = useRef();
   const userVideoRef = useRef();
@@ -20,9 +25,56 @@ const App = () => {
 
 
   useEffect(() => {
-    socketRef.current = io(SIGNAL_SERVER);
+    const urlParams = new URLSearchParams(window.location.search);
+    const room = urlParams.get('room');
+    if (room) {
+      setRoomId(room);
+      setIsInvited(true);
+    }
+
+    socketRef.current = io(SIGNAL_SERVER, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5
+    });
+
+    socketRef.current.on('connect', () => {
+      console.log('✅ Socket connected:', socketRef.current.id);
+      setConnectionStatus('Online');
+      setError('');
+    });
+
+    socketRef.current.on('connect_error', (err) => {
+      console.error('❌ Socket connection error:', err);
+      setConnectionStatus('Error');
+      setError(`Signal server unreachable. Please try again later.`);
+    });
+
+    socketRef.current.on('disconnect', (reason) => {
+      console.log('ℹ️ Socket disconnected:', reason);
+      setConnectionStatus('Offline');
+    });
+
+    socketRef.current.on('room-full', () => {
+      console.warn('⚠️ Room is full');
+      setConnectionStatus('Room Full');
+      setError('This room is full (max 4 participants).');
+      setJoined(false);
+      // Clean up local stream if it was started
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        setStream(null);
+      }
+    });
+
+    socketRef.current.on('error', (msg) => {
+      setError(msg);
+    });
 
     socketRef.current.on('user-joined', async (userId) => {
+      if (Object.keys(peersRef.current).length >= MAX_PARTICIPANTS - 1) {
+        console.warn('Room full: Skipping connection with user', userId);
+        return;
+      }
       console.log('User joined:', userId);
       const pc = createPeerConnection(userId);
       const offer = await pc.createOffer();
@@ -31,24 +83,30 @@ const App = () => {
     });
 
     socketRef.current.on('offer', async ({ from, offer }) => {
-      console.log('Received offer from:', from);
+      console.log('📩 Received offer from:', from);
+      if (Object.keys(peersRef.current).length >= MAX_PARTICIPANTS - 1) {
+        console.warn('🚫 Room full: Ignoring offer from', from);
+        return;
+      }
       const pc = createPeerConnection(from);
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      console.log('📤 Sending answer to:', from);
       socketRef.current.emit('answer', { target: from, answer });
     });
 
     socketRef.current.on('answer', async ({ from, answer }) => {
-      console.log('Received answer from:', from);
+      console.log('📩 Received answer from:', from);
       const pc = peersRef.current[from];
       if (pc) {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        console.log('✅ Remote description set for:', from);
       }
     });
 
     socketRef.current.on('ice-candidate', async ({ from, candidate }) => {
-      console.log('Received candidate from:', from);
+      console.log('🧊 Received ICE candidate from:', from);
       const pc = peersRef.current[from];
       if (pc) {
         await pc.addIceCandidate(new RTCIceCandidate(candidate));
@@ -80,12 +138,21 @@ const App = () => {
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log('📤 Sending ICE candidate to:', userId);
         socketRef.current.emit('ice-candidate', { target: userId, candidate: event.candidate });
       }
     };
 
+    pc.oniceconnectionstatechange = () => {
+      console.log(`❄️ ICE ${userId}:`, pc.iceConnectionState);
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log(`🔗 Connection ${userId}:`, pc.connectionState);
+    };
+
     pc.ontrack = (event) => {
-      console.log('Received track for:', userId);
+      console.log('📺 Received track for:', userId, event.streams[0]);
       setPeers(prev => ({
         ...prev,
         [userId]: event.streams[0]
@@ -93,6 +160,7 @@ const App = () => {
     };
 
     if (streamRef.current) {
+      console.log('📤 Adding local tracks to PC for:', userId);
       streamRef.current.getTracks().forEach(track => pc.addTrack(track, streamRef.current));
     }
 
@@ -101,16 +169,20 @@ const App = () => {
   };
 
   const joinRoom = async () => {
-    if (!roomId) return;
+    const trimmedId = roomId.trim();
+    if (!trimmedId) return;
+    
+    setError(''); // Clear any previous errors
+    console.log('Attempting to join room:', trimmedId);
     try {
       const userStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       setStream(userStream);
       streamRef.current = userStream;
-      socketRef.current.emit('join-room', roomId);
+      socketRef.current.emit('join-room', trimmedId);
       setJoined(true);
     } catch (err) {
       console.error('Error accessing media:', err);
-      alert('Could not access camera/microphone');
+      alert('Could not access camera/microphone. Please ensure permissions are granted.');
     }
   };
 
@@ -134,6 +206,13 @@ const App = () => {
     window.location.reload();
   };
 
+  const handleCopyLink = () => {
+    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+    navigator.clipboard.writeText(shareUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
   return (
     <div className="container">
       <AnimatePresence mode="wait">
@@ -146,19 +225,56 @@ const App = () => {
             className="join-screen glass"
           >
             <div className="header">
-              <span className="status-badge">WebRTC Video</span>
+              <span className={`status-badge ${connectionStatus.toLowerCase()}`}>{connectionStatus}</span>
               <h1>Meet</h1>
-              <p>Join a room to start talking</p>
+              <p>{isInvited ? 'You have been invited' : 'Join a room to start talking'}</p>
             </div>
-            <input 
-              type="text" 
-              placeholder="Enter Room ID (e.g. project-x)" 
-              value={roomId}
-              onChange={(e) => setRoomId(e.target.value)}
-            />
-            <button className="btn btn-primary" style={{ width: '100%' }} onClick={joinRoom}>
-              Join Room
-            </button>
+
+            {error && (
+              <div className="error-alert">
+                {error}
+              </div>
+            )}
+
+            {isInvited ? (
+              <div className="invited-container">
+                <div className="invited-box glass">
+                  <span>Room ID</span>
+                  <h2>{roomId}</h2>
+                </div>
+                <button className="btn btn-primary" style={{ width: '100%' }} onClick={joinRoom}>
+                  Join Meeting Now
+                </button>
+                <button className="btn-link" onClick={() => setIsInvited(false)}>
+                  Enter a different room ID
+                </button>
+              </div>
+            ) : (
+              <>
+                <input 
+                  type="text" 
+                  placeholder="Enter Room ID (e.g. project-x)" 
+                  value={roomId}
+                  onChange={(e) => setRoomId(e.target.value)}
+                />
+                
+                {roomId && (
+                  <div className="share-link-container">
+                    <p>Share this link with others:</p>
+                    <div className="share-input-group">
+                      <input readOnly value={`${window.location.origin}${window.location.pathname}?room=${roomId}`} />
+                      <button className="btn-icon" onClick={handleCopyLink}>
+                        {copied ? <Check size={18} color="#10b981" /> : <Copy size={18} />}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <button className="btn btn-primary" style={{ width: '100%' }} onClick={joinRoom}>
+                  Join Room
+                </button>
+              </>
+            )}
           </motion.div>
         ) : (
           <motion.div 
@@ -167,6 +283,15 @@ const App = () => {
             animate={{ opacity: 1 }}
             className="call-screen"
           >
+            <div className="room-info-badge glass" onClick={handleCopyLink}>
+              <Share2 size={16} />
+              <span>Room: {roomId}</span>
+              <div className="participant-count">
+                {Object.keys(peers).length + 1} / {MAX_PARTICIPANTS} users
+              </div>
+              {copied ? <Check size={14} color="#10b981" /> : <Copy size={14} />}
+            </div>
+
             <div className="video-container">
               <div className="video-wrapper glass">
                 <VideoPlayer stream={stream} muted={true} />
