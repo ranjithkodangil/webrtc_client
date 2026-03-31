@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import io from 'socket.io-client';
+import Pusher from 'pusher-js';
 import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const SIGNAL_SERVER = 'https://webrtc-server-liard.vercel.app';
+const SIGNAL_SERVER = 'http://localhost:5000';
+const PUSHER_KEY = import.meta.env.VITE_PUSHER_KEY || 'your-pusher-key';
+const PUSHER_CLUSTER = import.meta.env.VITE_PUSHER_CLUSTER || 'mt1';
 const MAX_PARTICIPANTS = 4;
 
 const App = () => {
@@ -18,11 +20,11 @@ const App = () => {
   const [error, setError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
 
-  const socketRef = useRef();
-  const userVideoRef = useRef();
+  const pusherRef = useRef();
+  const channelRef = useRef();
+  const privateChannelRef = useRef();
   const streamRef = useRef();
-  const peersRef = useRef({}); // { socketId: RTCPeerConnection }
-
+  const peersRef = useRef({}); // { userId: RTCPeerConnection }
 
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
@@ -32,114 +34,61 @@ const App = () => {
       setIsInvited(true);
     }
 
-    socketRef.current = io(SIGNAL_SERVER, {
-      transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5
+    // Initialize Pusher
+    pusherRef.current = new Pusher(PUSHER_KEY, {
+      cluster: PUSHER_CLUSTER,
+      authEndpoint: `${SIGNAL_SERVER}/api/pusher/auth`,
     });
 
-    socketRef.current.on('connect', () => {
-      console.log('✅ Socket connected:', socketRef.current.id);
+    pusherRef.current.connection.bind('connected', () => {
+      console.log('✅ Pusher connected:', pusherRef.current.connection.socket_id);
       setConnectionStatus('Online');
       setError('');
     });
 
-    socketRef.current.on('connect_error', (err) => {
-      console.error('❌ Socket connection error:', err);
+    pusherRef.current.connection.bind('error', (err) => {
+      console.error('❌ Pusher connection error:', err);
       setConnectionStatus('Error');
-      setError(`Signal server unreachable. Please try again later.`);
-    });
-
-    socketRef.current.on('disconnect', (reason) => {
-      console.log('ℹ️ Socket disconnected:', reason);
-      setConnectionStatus('Offline');
-    });
-
-    socketRef.current.on('room-full', () => {
-      console.warn('⚠️ Room is full');
-      setConnectionStatus('Room Full');
-      setError('This room is full (max 4 participants).');
-      setJoined(false);
-      // Clean up local stream if it was started
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        setStream(null);
-      }
-    });
-
-    socketRef.current.on('error', (msg) => {
-      setError(msg);
-    });
-
-    socketRef.current.on('user-joined', async (userId) => {
-      if (Object.keys(peersRef.current).length >= MAX_PARTICIPANTS - 1) {
-        console.warn('Room full: Skipping connection with user', userId);
-        return;
-      }
-      console.log('User joined:', userId);
-      const pc = createPeerConnection(userId);
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      socketRef.current.emit('offer', { target: userId, offer });
-    });
-
-    socketRef.current.on('offer', async ({ from, offer }) => {
-      console.log('📩 Received offer from:', from);
-      if (Object.keys(peersRef.current).length >= MAX_PARTICIPANTS - 1) {
-        console.warn('🚫 Room full: Ignoring offer from', from);
-        return;
-      }
-      const pc = createPeerConnection(from);
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      console.log('📤 Sending answer to:', from);
-      socketRef.current.emit('answer', { target: from, answer });
-    });
-
-    socketRef.current.on('answer', async ({ from, answer }) => {
-      console.log('📩 Received answer from:', from);
-      const pc = peersRef.current[from];
-      if (pc) {
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
-        console.log('✅ Remote description set for:', from);
-      }
-    });
-
-    socketRef.current.on('ice-candidate', async ({ from, candidate }) => {
-      console.log('🧊 Received ICE candidate from:', from);
-      const pc = peersRef.current[from];
-      if (pc) {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      }
-    });
-
-    socketRef.current.on('user-left', (userId) => {
-      console.log('User left:', userId);
-      if (peersRef.current[userId]) {
-        peersRef.current[userId].close();
-        delete peersRef.current[userId];
-      }
-      setPeers(prev => {
-        const next = { ...prev };
-        delete next[userId];
-        return next;
-      });
+      setError('Signal server unreachable. Please check Pusher credentials.');
     });
 
     return () => {
-      socketRef.current.disconnect();
+      if (pusherRef.current) {
+        pusherRef.current.disconnect();
+      }
     };
   }, []);
+
+  const sendSignal = async (target, event, data) => {
+    try {
+      await fetch(`${SIGNAL_SERVER}/api/signal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target,
+          event,
+          data,
+          from: pusherRef.current.connection.socket_id,
+        }),
+      });
+    } catch (err) {
+      console.error('Failed to send signal:', err);
+    }
+  };
+
+  const iceQueueRef = useRef({}); // { userId: [RTCIceCandidate] }
 
   const createPeerConnection = (userId) => {
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
     });
 
+    iceQueueRef.current[userId] = [];
+
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         console.log('📤 Sending ICE candidate to:', userId);
-        socketRef.current.emit('ice-candidate', { target: userId, candidate: event.candidate });
+        sendSignal(userId, 'ice-candidate', event.candidate);
       }
     };
 
@@ -149,6 +98,9 @@ const App = () => {
 
     pc.onconnectionstatechange = () => {
       console.log(`🔗 Connection ${userId}:`, pc.connectionState);
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        cleanupPeer(userId);
+      }
     };
 
     pc.ontrack = (event) => {
@@ -168,21 +120,112 @@ const App = () => {
     return pc;
   };
 
+  const processIceQueue = (userId) => {
+    const pc = peersRef.current[userId];
+    const queue = iceQueueRef.current[userId];
+    if (pc && pc.remoteDescription && queue) {
+      console.log(`🧊 Processing ${queue.length} queued ICE candidates for ${userId}`);
+      while (queue.length > 0) {
+        const candidate = queue.shift();
+        pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => 
+          console.error('Error adding queued ICE candidate', e)
+        );
+      }
+    }
+  };
+
+  const cleanupPeer = (userId) => {
+    if (peersRef.current[userId]) {
+      peersRef.current[userId].close();
+      delete peersRef.current[userId];
+    }
+    delete iceQueueRef.current[userId];
+    setPeers(prev => {
+      const next = { ...prev };
+      delete next[userId];
+      return next;
+    });
+  };
+
   const joinRoom = async () => {
     const trimmedId = roomId.trim();
     if (!trimmedId) return;
     
-    setError(''); // Clear any previous errors
+    setError('');
     console.log('Attempting to join room:', trimmedId);
     try {
       const userStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       setStream(userStream);
       streamRef.current = userStream;
-      socketRef.current.emit('join-room', trimmedId);
-      setJoined(true);
+
+      const selfId = pusherRef.current.connection.socket_id;
+
+      // 1. Subscribe to Presence Channel (for discovery)
+      channelRef.current = pusherRef.current.subscribe(`presence-room-${trimmedId}`);
+
+      channelRef.current.bind('pusher:subscription_succeeded', (members) => {
+        console.log('✅ Joined room as:', selfId);
+        setJoined(true);
+
+        // 3. Initiate connections to everyone already in the room
+        members.each((member) => {
+          if (member.id !== selfId) {
+            console.log('👤 Existing user found:', member.id);
+            const pc = createPeerConnection(member.id);
+            pc.createOffer().then(async (offer) => {
+              await pc.setLocalDescription(offer);
+              sendSignal(member.id, 'offer', offer);
+            });
+          }
+        });
+      });
+
+      channelRef.current.bind('pusher:member_added', async (member) => {
+        console.log('👤 New user joined:', member.id);
+      });
+
+      channelRef.current.bind('pusher:member_removed', (member) => {
+        console.log('👤 User left:', member.id);
+        cleanupPeer(member.id);
+      });
+
+      // 2. Subscribe to Private Channel (for incoming signals)
+      privateChannelRef.current = pusherRef.current.subscribe(`private-user-${selfId}`);
+
+      privateChannelRef.current.bind('offer', async ({ from, signal: offer }) => {
+        console.log('📩 Received offer from:', from);
+        const pc = createPeerConnection(from);
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        sendSignal(from, 'answer', answer);
+        processIceQueue(from);
+      });
+
+      privateChannelRef.current.bind('answer', async ({ from, signal: answer }) => {
+        console.log('📩 Received answer from:', from);
+        const pc = peersRef.current[from];
+        if (pc) {
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+          processIceQueue(from);
+        }
+      });
+
+      privateChannelRef.current.bind('ice-candidate', async ({ from, signal: candidate }) => {
+        console.log('🧊 Received ICE candidate from:', from);
+        const pc = peersRef.current[from];
+        if (pc && pc.remoteDescription) {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } else {
+          console.log('⏳ Remote description not set, queueing ICE candidate');
+          if (!iceQueueRef.current[from]) iceQueueRef.current[from] = [];
+          iceQueueRef.current[from].push(candidate);
+        }
+      });
+
     } catch (err) {
-      console.error('Error accessing media:', err);
-      alert('Could not access camera/microphone. Please ensure permissions are granted.');
+      console.error('Error accessing media/joining:', err);
+      setError('Could not access camera/microphone or connect to signal server.');
     }
   };
 

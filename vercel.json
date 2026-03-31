@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://webrtc-server-liard.vercel.app/api/:path*"
+    }
+  ]
+}
