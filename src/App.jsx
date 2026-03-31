@@ -19,9 +19,13 @@ const App = () => {
   const [isInvited, setIsInvited] = useState(false);
   const [error, setError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
+  const [pin, setPin] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+  const [timeRemaining, setTimeRemaining] = useState(60);
 
   const pusherRef = useRef();
   const channelRef = useRef();
+  const pinRef = useRef('');
   const privateChannelRef = useRef();
   const streamRef = useRef();
   const peersRef = useRef({}); // { userId: RTCPeerConnection }
@@ -38,6 +42,11 @@ const App = () => {
     pusherRef.current = new Pusher(PUSHER_KEY, {
       cluster: PUSHER_CLUSTER,
       authEndpoint: `${SIGNAL_SERVER}/api/pusher/auth`,
+      auth: {
+        paramsProvider: () => ({
+          pin: pinRef.current
+        })
+      }
     });
 
     pusherRef.current.connection.bind('connected', () => {
@@ -58,6 +67,31 @@ const App = () => {
       }
     };
   }, []);
+
+  useEffect(() => {
+    pinRef.current = pin;
+  }, [pin]);
+
+  // Solitude Timer: Kick user if alone for > 60s
+  useEffect(() => {
+    let timer;
+    if (joined && Object.keys(peers).length === 0) {
+      setTimeRemaining(60);
+      timer = setInterval(() => {
+        setTimeRemaining(prev => {
+          if (prev <= 1) {
+            clearInterval(timer);
+            leaveCall('Room closed: No other participants joined within 1 minute.');
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    } else {
+      setTimeRemaining(60);
+    }
+    return () => clearInterval(timer);
+  }, [joined, Object.keys(peers).length]);
 
   const sendSignal = async (target, event, data) => {
     try {
@@ -225,7 +259,11 @@ const App = () => {
 
     } catch (err) {
       console.error('Error accessing media/joining:', err);
-      setError('Could not access camera/microphone or connect to signal server.');
+      if (err.message === 'Invalid PIN for room creation') {
+        setError('Invalid PIN. You need the correct secret PIN to create a new room.');
+      } else {
+        setError('Could not access camera/microphone or connect to signal server.');
+      }
     }
   };
 
@@ -245,7 +283,8 @@ const App = () => {
     }
   };
 
-  const leaveCall = () => {
+  const leaveCall = (reason) => {
+    if (reason) alert(reason);
     window.location.reload();
   };
 
@@ -293,15 +332,42 @@ const App = () => {
                 </button>
               </div>
             ) : (
-              <>
+              <div className="join-form">
+                <div className="mode-toggle glass">
+                  <button 
+                    className={!isCreating ? 'active' : ''} 
+                    onClick={() => setIsCreating(false)}
+                  >
+                    Join Existing
+                  </button>
+                  <button 
+                    className={isCreating ? 'active' : ''} 
+                    onClick={() => setIsCreating(true)}
+                  >
+                    Create New
+                  </button>
+                </div>
+
                 <input 
                   type="text" 
                   placeholder="Enter Room ID (e.g. project-x)" 
                   value={roomId}
                   onChange={(e) => setRoomId(e.target.value)}
                 />
+
+                {isCreating && (
+                  <motion.input 
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    type="password" 
+                    placeholder="Enter Secret PIN to Create" 
+                    value={pin}
+                    onChange={(e) => setPin(e.target.value)}
+                    style={{ marginTop: '1rem' }}
+                  />
+                )}
                 
-                {roomId && (
+                {roomId && !isCreating && (
                   <div className="share-link-container">
                     <p>Share this link with others:</p>
                     <div className="share-input-group">
@@ -313,10 +379,15 @@ const App = () => {
                   </div>
                 )}
 
-                <button className="btn btn-primary" style={{ width: '100%' }} onClick={joinRoom}>
-                  Join Room
+                <button 
+                  className="btn btn-primary" 
+                  style={{ width: '100%', marginTop: '1rem' }} 
+                  onClick={joinRoom}
+                  disabled={isCreating && !pin}
+                >
+                  {isCreating ? 'Create & Join' : 'Join Room'}
                 </button>
-              </>
+              </div>
             )}
           </motion.div>
         ) : (
@@ -332,6 +403,11 @@ const App = () => {
               <div className="participant-count">
                 {Object.keys(peers).length + 1} / {MAX_PARTICIPANTS} users
               </div>
+              {Object.keys(peers).length === 0 && (
+                <div className="solitude-warning">
+                  Closing in {timeRemaining}s
+                </div>
+              )}
               {copied ? <Check size={14} color="#10b981" /> : <Copy size={14} />}
             </div>
 

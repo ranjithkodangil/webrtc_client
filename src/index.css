@@ -321,4 +321,51 @@ input:focus {
   margin-bottom: 1rem;
 }
 
+.mode-toggle {
+  display: flex;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 14px;
+  margin-bottom: 1rem;
+}
+
+.mode-toggle button {
+  flex: 1;
+  padding: 8px;
+  border: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 10px;
+  transition: all 0.2s;
+}
+
+.mode-toggle button.active {
+  background: rgba(59, 130, 246, 0.2);
+  color: #3b82f6;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.solitude-warning {
+  font-size: 0.75rem;
+  color: #ef4444;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 0.6; }
+  50% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+
+.join-form {
+  display: flex;
+  flex-direction: column;
+}
+
 
