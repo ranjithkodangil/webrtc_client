@@ -3,7 +3,7 @@ import Pusher from 'pusher-js';
 import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-const SIGNAL_SERVER = 'http://localhost:5000';
+const SIGNAL_SERVER = '';
 const PUSHER_KEY = import.meta.env.VITE_PUSHER_KEY || 'your-pusher-key';
 const PUSHER_CLUSTER = import.meta.env.VITE_PUSHER_CLUSTER || 'mt1';
 const MAX_PARTICIPANTS = 4;
