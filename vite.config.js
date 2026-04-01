@@ -7,7 +7,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
-    base: process.env.VITE_BASE_PATH || '/',
+    base: process.env.VITE_BASE_PATH ||  (isDev ? '/' : '/webrtc_client'),
     server: {
       proxy: {
         '/api': {
