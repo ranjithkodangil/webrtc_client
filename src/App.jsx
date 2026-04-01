@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Pusher from 'pusher-js';
-import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check } from 'lucide-react';
+import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check, Monitor } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const SIGNAL_SERVER = '';
@@ -20,14 +20,15 @@ const App = () => {
   const [error, setError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('Disconnected');
   const [pin, setPin] = useState('');
-  const [isCreating, setIsCreating] = useState(false);
   const [timeRemaining, setTimeRemaining] = useState(60);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
 
   const pusherRef = useRef();
   const channelRef = useRef();
   const pinRef = useRef('');
   const privateChannelRef = useRef();
   const streamRef = useRef();
+  const screenStreamRef = useRef();
   const peersRef = useRef({}); // { userId: RTCPeerConnection }
 
   useEffect(() => {
@@ -36,6 +37,8 @@ const App = () => {
     if (room) {
       setRoomId(room);
       setIsInvited(true);
+    } else {
+      setRoomId(crypto.randomUUID());
     }
 
     // Initialize Pusher
@@ -147,7 +150,17 @@ const App = () => {
 
     if (streamRef.current) {
       console.log('📤 Adding local tracks to PC for:', userId);
-      streamRef.current.getTracks().forEach(track => pc.addTrack(track, streamRef.current));
+      // Always add audio from the camera/mic stream
+      streamRef.current.getAudioTracks().forEach(track => pc.addTrack(track, streamRef.current));
+      
+      // Add video track (either camera or screen)
+      const videoTrack = isScreenSharing && screenStreamRef.current 
+        ? screenStreamRef.current.getVideoTracks()[0] 
+        : streamRef.current.getVideoTracks()[0];
+        
+      if (videoTrack) {
+        pc.addTrack(videoTrack, isScreenSharing ? screenStreamRef.current : streamRef.current);
+      }
     }
 
     peersRef.current[userId] = pc;
@@ -283,6 +296,47 @@ const App = () => {
     }
   };
 
+  const toggleScreenSharing = async () => {
+    if (!isScreenSharing) {
+      try {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        screenStreamRef.current = screenStream;
+        const screenTrack = screenStream.getVideoTracks()[0];
+
+        // Replace track for all peers
+        Object.values(peersRef.current).forEach(pc => {
+          const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+          if (sender) sender.replaceTrack(screenTrack);
+        });
+
+        setIsScreenSharing(true);
+        setStream(new MediaStream([screenTrack, streamRef.current.getAudioTracks()[0]]));
+
+        screenTrack.onended = () => stopScreenSharing();
+      } catch (err) {
+        console.error('Error sharing screen:', err);
+      }
+    } else {
+      stopScreenSharing();
+    }
+  };
+
+  const stopScreenSharing = () => {
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
+      screenStreamRef.current = null;
+    }
+
+    const cameraTrack = streamRef.current.getVideoTracks()[0];
+    Object.values(peersRef.current).forEach(pc => {
+      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+      if (sender) sender.replaceTrack(cameraTrack);
+    });
+
+    setIsScreenSharing(false);
+    setStream(streamRef.current);
+  };
+
   const leaveCall = (reason) => {
     if (reason) alert(reason);
     window.location.reload();
@@ -309,7 +363,7 @@ const App = () => {
             <div className="header">
               <span className={`status-badge ${connectionStatus.toLowerCase()}`}>{connectionStatus}</span>
               <h1>Meet</h1>
-              <p>{isInvited ? 'You have been invited' : 'Join a room to start talking'}</p>
+              <p>{isInvited ? 'You have been invited' : 'Create a room to start talking'}</p>
             </div>
 
             {error && (
@@ -328,26 +382,11 @@ const App = () => {
                   Join Meeting Now
                 </button>
                 <button className="btn-link" onClick={() => setIsInvited(false)}>
-                  Enter a different room ID
+                  Create a new room
                 </button>
               </div>
             ) : (
               <div className="join-form">
-                <div className="mode-toggle glass">
-                  <button 
-                    className={!isCreating ? 'active' : ''} 
-                    onClick={() => setIsCreating(false)}
-                  >
-                    Join Existing
-                  </button>
-                  <button 
-                    className={isCreating ? 'active' : ''} 
-                    onClick={() => setIsCreating(true)}
-                  >
-                    Create New
-                  </button>
-                </div>
-
                 <input 
                   type="text" 
                   placeholder="Enter Room ID (e.g. project-x)" 
@@ -355,19 +394,15 @@ const App = () => {
                   onChange={(e) => setRoomId(e.target.value)}
                 />
 
-                {isCreating && (
-                  <motion.input 
-                    initial={{ opacity: 0, height: 0 }}
-                    animate={{ opacity: 1, height: 'auto' }}
-                    type="password" 
-                    placeholder="Enter Secret PIN to Create" 
-                    value={pin}
-                    onChange={(e) => setPin(e.target.value)}
-                    style={{ marginTop: '1rem' }}
-                  />
-                )}
+                <input 
+                  type="password" 
+                  placeholder="Enter Secret PIN to Create" 
+                  value={pin}
+                  onChange={(e) => setPin(e.target.value)}
+                  style={{ marginTop: '1rem' }}
+                />
                 
-                {roomId && !isCreating && (
+                {roomId && (
                   <div className="share-link-container">
                     <p>Share this link with others:</p>
                     <div className="share-input-group">
@@ -383,9 +418,9 @@ const App = () => {
                   className="btn btn-primary" 
                   style={{ width: '100%', marginTop: '1rem' }} 
                   onClick={joinRoom}
-                  disabled={isCreating && !pin}
+                  disabled={!pin}
                 >
-                  {isCreating ? 'Create & Join' : 'Join Room'}
+                  Create & Join
                 </button>
               </div>
             )}
@@ -429,8 +464,11 @@ const App = () => {
               <button className={`btn ${isMuted ? 'btn-danger' : 'btn-secondary'}`} onClick={toggleMute}>
                 {isMuted ? <MicOff /> : <Mic />}
               </button>
-              <button className={`btn ${isVideoOff ? 'btn-danger' : 'btn-secondary'}`} onClick={toggleVideo}>
+              <button className={`btn ${isVideoOff ? 'btn-danger' : 'btn-secondary'}`} onClick={toggleVideo} disabled={isScreenSharing}>
                 {isVideoOff ? <CameraOff /> : <Camera />}
+              </button>
+              <button className={`btn ${isScreenSharing ? 'btn-primary active' : 'btn-secondary'}`} onClick={toggleScreenSharing}>
+                <Monitor />
               </button>
               <button className="btn btn-danger" onClick={leaveCall}>
                 <PhoneOff />
