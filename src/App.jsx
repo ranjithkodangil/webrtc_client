@@ -10,6 +10,16 @@ const PUSHER_KEY = import.meta.env.VITE_PUSHER_KEY || 'your-pusher-key';
 const PUSHER_CLUSTER = import.meta.env.VITE_PUSHER_CLUSTER || 'mt1';
 const MAX_PARTICIPANTS = 4;
 
+// Utility to generate a stable 8-char hash for room salting
+const generateHash = async (roomId, pin) => {
+  if (!roomId || !pin) return '';
+  const msgUint8 = new TextEncoder().encode(`${roomId}-${pin}`);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  // Convert to hex and take first 8 chars
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 8);
+};
+
 const App = () => {
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
@@ -27,6 +37,8 @@ const App = () => {
   const [isPinVerified, setIsPinVerified] = useState(false);
   const [isVerifying, setIsVerifying] = useState(false);
   const [pinError, setPinError] = useState('');
+  const [saltedRoomId, setSaltedRoomId] = useState('');
+  const [showQR, setShowQR] = useState(false);
 
   const pusherRef = useRef();
   const channelRef = useRef();
@@ -40,20 +52,40 @@ const App = () => {
     const urlParams = new URLSearchParams(window.location.search);
     const room = urlParams.get('room');
     if (room) {
-      setRoomId(room);
+      // If the room name contains '--', it's a salted ID
+      if (room.includes('--')) {
+        setSaltedRoomId(room);
+        setRoomId(room.split('--')[0]);
+        setIsPinVerified(true); // Salted ID acts as the key for guests
+      } else {
+        setRoomId(room);
+      }
       setIsInvited(true);
     } else {
-      setRoomId(crypto.randomUUID());
+      setRoomId(crypto.randomUUID().slice(0, 8));
     }
 
-    // Initialize Pusher
+    // Initialize Pusher with a custom authorizer for reliable PIN delivery
     pusherRef.current = new Pusher(PUSHER_KEY, {
       cluster: PUSHER_CLUSTER,
-      authEndpoint: `${SIGNAL_SERVER}/api/pusher/auth`,
-      auth: {
-        paramsProvider: () => ({
-          pin: pinRef.current
-        })
+      authorizer: (channel, options) => {
+        return {
+          authorize: (socketId, callback) => {
+            console.log(`🔑 Authorizing channel ${channel.name} with PIN:`, pinRef.current);
+            fetch(`${SIGNAL_SERVER}/api/pusher/auth`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                socket_id: socketId,
+                channel_name: channel.name,
+                pin: pinRef.current
+              })
+            })
+            .then(res => res.json())
+            .then(data => callback(null, data))
+            .catch(err => callback(err));
+          }
+        };
       }
     });
 
@@ -210,6 +242,8 @@ const App = () => {
         body: JSON.stringify({ pin }),
       });
       if (response.ok) {
+        const hash = await generateHash(roomId.trim(), pin);
+        setSaltedRoomId(`${roomId.trim()}--${hash}`);
         setIsPinVerified(true);
         setPinError('');
       } else {
@@ -234,9 +268,10 @@ const App = () => {
       streamRef.current = userStream;
 
       const selfId = pusherRef.current.connection.socket_id;
+      const finalRoomId = saltedRoomId || trimmedId;
 
       // 1. Subscribe to Presence Channel (for discovery)
-      channelRef.current = pusherRef.current.subscribe(`presence-room-${trimmedId}`);
+      channelRef.current = pusherRef.current.subscribe(`presence-room-${finalRoomId}`);
 
       channelRef.current.bind('pusher:subscription_succeeded', (members) => {
         console.log('✅ Joined room as:', selfId);
@@ -371,7 +406,8 @@ const App = () => {
   };
 
   const handleCopyLink = () => {
-    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${roomId}`;
+    const finalId = saltedRoomId || roomId;
+    const shareUrl = `${window.location.origin}${window.location.pathname}?room=${finalId}`;
     navigator.clipboard.writeText(shareUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -464,8 +500,8 @@ const App = () => {
                             <QRCode 
                               value={`${window.location.origin}${window.location.pathname}?room=${roomId}`} 
                               size={160}
-                              bgColor="transparent"
-                              fgColor="#60a5fa"
+                              bgColor="#ffffff"
+                              fgColor="#0f172a"
                             />
                           </div>
                           <button className="btn btn-secondary btn-copy" onClick={handleCopyLink}>
@@ -504,7 +540,7 @@ const App = () => {
             animate={{ opacity: 1 }}
             className="call-screen"
           >
-            <div className="room-info-badge glass" onClick={handleCopyLink}>
+            <div className="room-info-badge glass" onClick={() => setShowQR(true)}>
               <Share2 size={16} />
               <span>Room: {roomId}</span>
               <div className="participant-count">
@@ -515,7 +551,7 @@ const App = () => {
                   Closing in {timeRemaining}s
                 </div>
               )}
-              {copied ? <Check size={14} color="#10b981" /> : <Copy size={14} />}
+              <Check size={14} style={{ opacity: copied ? 1 : 0, color: "#10b981" }} />
             </div>
 
             <div className="video-container">
@@ -546,6 +582,54 @@ const App = () => {
                 <PhoneOff />
               </button>
             </div>
+
+            {/* QR Code Sharing Modal */}
+            <AnimatePresence>
+              {showQR && (
+                <motion.div 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="modal-overlay"
+                  onClick={() => setShowQR(false)}
+                >
+                  <motion.div 
+                    initial={{ scale: 0.9, y: 20 }}
+                    animate={{ scale: 1, y: 0 }}
+                    exit={{ scale: 0.9, y: 20 }}
+                    className="modal-content glass"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="modal-header">
+                      <h3>Share Meeting</h3>
+                      <p>Invite others to join this secure room</p>
+                    </div>
+
+                    <div className="qr-wrapper glass" style={{ margin: '2rem auto' }}>
+                      <QRCode 
+                        value={`${window.location.origin}${window.location.pathname}?room=${saltedRoomId || roomId}`} 
+                        size={200}
+                        bgColor="#ffffff"
+                        fgColor="#0f172a"
+                      />
+                    </div>
+
+                    <div className="modal-actions">
+                      <button className="btn btn-secondary" onClick={handleCopyLink}>
+                        {copied ? (
+                          <><Check size={18} color="#10b981" /> Copied!</>
+                        ) : (
+                          <><Copy size={18} /> Copy Link</>
+                        )}
+                      </button>
+                      <button className="btn btn-danger" onClick={() => setShowQR(false)}>
+                        Close
+                      </button>
+                    </div>
+                  </motion.div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </motion.div>
         )}
       </AnimatePresence>
