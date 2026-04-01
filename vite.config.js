@@ -8,7 +8,7 @@ export default defineConfig({
 
     proxy: {
       '/api': {
-        target: 'https://webrtc-server-liard.vercel.app',
+        target: 'http://localhost:5000',
         changeOrigin: true,
         secure: false,
       }

@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import Pusher from 'pusher-js';
 import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check, Monitor } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { QRCode } from 'react-qr-code';
+
 
 const SIGNAL_SERVER = '';
 const PUSHER_KEY = import.meta.env.VITE_PUSHER_KEY || 'your-pusher-key';
@@ -22,6 +24,9 @@ const App = () => {
   const [pin, setPin] = useState('');
   const [timeRemaining, setTimeRemaining] = useState(60);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [isPinVerified, setIsPinVerified] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [pinError, setPinError] = useState('');
 
   const pusherRef = useRef();
   const channelRef = useRef();
@@ -192,6 +197,29 @@ const App = () => {
       delete next[userId];
       return next;
     });
+  };
+
+  const handleVerifyPin = async () => {
+    if (!pin) return;
+    setIsVerifying(true);
+    setPinError('');
+    try {
+      const response = await fetch(`${SIGNAL_SERVER}/api/verify-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin }),
+      });
+      if (response.ok) {
+        setIsPinVerified(true);
+        setPinError('');
+      } else {
+        setPinError('Invalid Secret PIN');
+      }
+    } catch (err) {
+      setPinError('Error verifying PIN. Make sure server is running.');
+    } finally {
+      setIsVerifying(false);
+    }
   };
 
   const joinRoom = async () => {
@@ -398,30 +426,74 @@ const App = () => {
                   type="password" 
                   placeholder="Enter Secret PIN to Create" 
                   value={pin}
-                  onChange={(e) => setPin(e.target.value)}
+                  onChange={(e) => {
+                    setPin(e.target.value);
+                    setIsPinVerified(false);
+                    setPinError('');
+                  }}
                   style={{ marginTop: '1rem' }}
                 />
-                
-                {roomId && (
-                  <div className="share-link-container">
-                    <p>Share this link with others:</p>
-                    <div className="share-input-group">
-                      <input readOnly value={`${window.location.origin}${window.location.pathname}?room=${roomId}`} />
-                      <button className="btn-icon" onClick={handleCopyLink}>
-                        {copied ? <Check size={18} color="#10b981" /> : <Copy size={18} />}
-                      </button>
-                    </div>
-                  </div>
+
+                {!isPinVerified && (
+                  <button 
+                    className="btn btn-secondary" 
+                    style={{ width: '100%', marginTop: '0.5rem' }}
+                    onClick={handleVerifyPin}
+                    disabled={isVerifying || !pin}
+                  >
+                    {isVerifying ? 'Verifying...' : 'Verify PIN'}
+                  </button>
                 )}
 
-                <button 
-                  className="btn btn-primary" 
-                  style={{ width: '100%', marginTop: '1rem' }} 
-                  onClick={joinRoom}
-                  disabled={!pin}
-                >
-                  Create & Join
-                </button>
+                {pinError && (
+                  <p style={{ color: '#ff4d4d', fontSize: '0.8rem', marginTop: '0.5rem' }}>
+                    {pinError}
+                  </p>
+                )}
+                
+                {isPinVerified && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                  >
+                    {roomId && (
+                      <div className="share-link-container">
+                        <p>Scan to join or copy link:</p>
+                        <div className="share-qr-group">
+                          <div className="qr-wrapper glass">
+                            <QRCode 
+                              value={`${window.location.origin}${window.location.pathname}?room=${roomId}`} 
+                              size={160}
+                              bgColor="transparent"
+                              fgColor="#60a5fa"
+                            />
+                          </div>
+                          <button className="btn btn-secondary btn-copy" onClick={handleCopyLink}>
+                            {copied ? (
+                              <>
+                                <Check size={18} color="#10b981" />
+                                <span>Copied!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy size={18} />
+                                <span>Copy Link</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <button 
+                      className="btn btn-primary" 
+                      style={{ width: '100%', marginTop: '1rem' }} 
+                      onClick={joinRoom}
+                    >
+                      Create & Join
+                    </button>
+                  </motion.div>
+                )}
               </div>
             )}
           </motion.div>
