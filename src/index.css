@@ -562,3 +562,66 @@ input:focus {
   border-color: #3b82f6;
   outline: none;
 }
+
+/* Responsive Overrides */
+@media (max-width: 850px) {
+  #root {
+    padding: 1rem;
+  }
+
+  .video-container {
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    padding-bottom: 80px;
+  }
+
+  .call-screen {
+    position: relative;
+    overflow: hidden;
+  }
+
+  .chat-sidebar {
+    position: absolute;
+    right: 0;
+    top: 0;
+    height: 100%;
+    width: 100%;
+    max-width: 360px;
+    z-index: 200;
+    box-shadow: -10px 0 30px rgba(0,0,0,0.5);
+  }
+}
+
+@media (max-width: 600px) {
+  .video-container {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .controls {
+    width: 90%;
+    bottom: 16px;
+    padding: 12px 16px;
+    justify-content: space-evenly;
+    border-radius: 24px;
+    background: rgba(15, 23, 42, 0.85); /* distinct background for float */
+  }
+
+  .btn {
+    width: 48px;
+    height: 48px;
+  }
+  
+  .header h1 {
+    font-size: 2rem;
+  }
+  
+  .join-screen {
+    padding: 20px;
+  }
+  
+  .room-info-badge {
+    top: 10px;
+    font-size: 0.8rem;
+    padding: 6px 16px;
+  }
+}

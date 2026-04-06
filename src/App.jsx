@@ -420,7 +420,7 @@ const App = () => {
   };
 
   const leaveCall = (reason) => {
-    if (reason) alert(reason);
+    if (typeof reason === 'string') alert(reason);
     window.location.reload();
   };
 
