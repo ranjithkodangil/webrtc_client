@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Pusher from 'pusher-js';
-import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check, Monitor } from 'lucide-react';
+import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check, Monitor, MessageSquare } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QRCode } from 'react-qr-code';
+import { initDB, saveMessageLocally, getMessagesLocally } from './db.js';
 
 
 const SIGNAL_SERVER = '';
@@ -40,6 +41,11 @@ const App = () => {
   const [saltedRoomId, setSaltedRoomId] = useState('');
   const [showQR, setShowQR] = useState(false);
 
+  // Chat state
+  const [showChat, setShowChat] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [chatInput, setChatInput] = useState('');
+
   const pusherRef = useRef();
   const channelRef = useRef();
   const pinRef = useRef('');
@@ -47,16 +53,23 @@ const App = () => {
   const streamRef = useRef();
   const screenStreamRef = useRef();
   const peersRef = useRef({}); // { userId: RTCPeerConnection }
+  const dataChannelsRef = useRef({}); // { userId: RTCDataChannel }
 
   useEffect(() => {
+    // Initialize DuckDB WASM on mount
+    initDB().then(() => {
+      getMessagesLocally().then(savedMsgs => {
+        if(savedMsgs.length > 0) setMessages(savedMsgs);
+      });
+    });
+
     const urlParams = new URLSearchParams(window.location.search);
     const room = urlParams.get('room');
     if (room) {
-      // If the room name contains '--', it's a salted ID
       if (room.includes('--')) {
         setSaltedRoomId(room);
         setRoomId(room.split('--')[0]);
-        setIsPinVerified(true); // Salted ID acts as the key for guests
+        setIsPinVerified(true);
       } else {
         setRoomId(room);
       }
@@ -65,13 +78,11 @@ const App = () => {
       setRoomId(crypto.randomUUID().slice(0, 8));
     }
 
-    // Initialize Pusher with a custom authorizer for reliable PIN delivery
     pusherRef.current = new Pusher(PUSHER_KEY, {
       cluster: PUSHER_CLUSTER,
       authorizer: (channel, options) => {
         return {
           authorize: (socketId, callback) => {
-            console.log(`🔑 Authorizing channel ${channel.name} with PIN:`, pinRef.current);
             fetch(`${SIGNAL_SERVER}/api/pusher/auth`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -90,21 +101,17 @@ const App = () => {
     });
 
     pusherRef.current.connection.bind('connected', () => {
-      console.log('✅ Pusher connected:', pusherRef.current.connection.socket_id);
       setConnectionStatus('Online');
       setError('');
     });
 
     pusherRef.current.connection.bind('error', (err) => {
-      console.error('❌ Pusher connection error:', err);
       setConnectionStatus('Error');
       setError('Signal server unreachable. Please check Pusher credentials.');
     });
 
     return () => {
-      if (pusherRef.current) {
-        pusherRef.current.disconnect();
-      }
+      if (pusherRef.current) pusherRef.current.disconnect();
     };
   }, []);
 
@@ -112,7 +119,6 @@ const App = () => {
     pinRef.current = pin;
   }, [pin]);
 
-  // Solitude Timer: Kick user if alone for > 60s
   useEffect(() => {
     let timer;
     if (joined && Object.keys(peers).length === 0) {
@@ -150,7 +156,13 @@ const App = () => {
     }
   };
 
-  const iceQueueRef = useRef({}); // { userId: [RTCIceCandidate] }
+  const iceQueueRef = useRef({});
+
+  const handleDataChannelMessage = (event) => {
+    const data = JSON.parse(event.data);
+    setMessages(prev => [...prev, data]);
+    saveMessageLocally(data.id, data.sender, data.content, data.timestamp);
+  };
 
   const createPeerConnection = (userId) => {
     const pc = new RTCPeerConnection({
@@ -159,26 +171,32 @@ const App = () => {
 
     iceQueueRef.current[userId] = [];
 
+    // Create Data Channel for chatting
+    const dc = pc.createDataChannel('chat');
+    dataChannelsRef.current[userId] = dc;
+    dc.onmessage = handleDataChannelMessage;
+
+    // Receive incoming Data Channel
+    pc.ondatachannel = (event) => {
+      const receiveChannel = event.channel;
+      receiveChannel.onmessage = handleDataChannelMessage;
+      // We overwrite since P2P chat can be bidirectional on the same channel, but it's safe to track
+      dataChannelsRef.current[userId] = receiveChannel; 
+    };
+
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        console.log('📤 Sending ICE candidate to:', userId);
         sendSignal(userId, 'ice-candidate', event.candidate);
       }
     };
 
-    pc.oniceconnectionstatechange = () => {
-      console.log(`❄️ ICE ${userId}:`, pc.iceConnectionState);
-    };
-
     pc.onconnectionstatechange = () => {
-      console.log(`🔗 Connection ${userId}:`, pc.connectionState);
       if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         cleanupPeer(userId);
       }
     };
 
     pc.ontrack = (event) => {
-      console.log('📺 Received track for:', userId, event.streams[0]);
       setPeers(prev => ({
         ...prev,
         [userId]: event.streams[0]
@@ -186,11 +204,7 @@ const App = () => {
     };
 
     if (streamRef.current) {
-      console.log('📤 Adding local tracks to PC for:', userId);
-      // Always add audio from the camera/mic stream
       streamRef.current.getAudioTracks().forEach(track => pc.addTrack(track, streamRef.current));
-      
-      // Add video track (either camera or screen)
       const videoTrack = isScreenSharing && screenStreamRef.current 
         ? screenStreamRef.current.getVideoTracks()[0] 
         : streamRef.current.getVideoTracks()[0];
@@ -208,7 +222,6 @@ const App = () => {
     const pc = peersRef.current[userId];
     const queue = iceQueueRef.current[userId];
     if (pc && pc.remoteDescription && queue) {
-      console.log(`🧊 Processing ${queue.length} queued ICE candidates for ${userId}`);
       while (queue.length > 0) {
         const candidate = queue.shift();
         pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => 
@@ -222,6 +235,9 @@ const App = () => {
     if (peersRef.current[userId]) {
       peersRef.current[userId].close();
       delete peersRef.current[userId];
+    }
+    if (dataChannelsRef.current[userId]) {
+      delete dataChannelsRef.current[userId];
     }
     delete iceQueueRef.current[userId];
     setPeers(prev => {
@@ -256,12 +272,34 @@ const App = () => {
     }
   };
 
+  const sendChatMessage = (e) => {
+    e.preventDefault();
+    if(!chatInput.trim()) return;
+
+    const msg = {
+      id: crypto.randomUUID(),
+      sender: pusherRef.current.connection.socket_id,
+      content: chatInput.trim(),
+      timestamp: Date.now()
+    };
+
+    // Broadcast to all connected peers
+    Object.values(dataChannelsRef.current).forEach(dc => {
+      if (dc.readyState === 'open') {
+        dc.send(JSON.stringify(msg));
+      }
+    });
+
+    setMessages(prev => [...prev, msg]);
+    saveMessageLocally(msg.id, msg.sender, msg.content, msg.timestamp);
+    setChatInput('');
+  };
+
   const joinRoom = async () => {
     const trimmedId = roomId.trim();
     if (!trimmedId) return;
     
     setError('');
-    console.log('Attempting to join room:', trimmedId);
     try {
       const userStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       setStream(userStream);
@@ -270,17 +308,12 @@ const App = () => {
       const selfId = pusherRef.current.connection.socket_id;
       const finalRoomId = saltedRoomId || trimmedId;
 
-      // 1. Subscribe to Presence Channel (for discovery)
       channelRef.current = pusherRef.current.subscribe(`presence-room-${finalRoomId}`);
 
       channelRef.current.bind('pusher:subscription_succeeded', (members) => {
-        console.log('✅ Joined room as:', selfId);
         setJoined(true);
-
-        // 3. Initiate connections to everyone already in the room
         members.each((member) => {
           if (member.id !== selfId) {
-            console.log('👤 Existing user found:', member.id);
             const pc = createPeerConnection(member.id);
             pc.createOffer().then(async (offer) => {
               await pc.setLocalDescription(offer);
@@ -290,20 +323,13 @@ const App = () => {
         });
       });
 
-      channelRef.current.bind('pusher:member_added', async (member) => {
-        console.log('👤 New user joined:', member.id);
-      });
-
       channelRef.current.bind('pusher:member_removed', (member) => {
-        console.log('👤 User left:', member.id);
         cleanupPeer(member.id);
       });
 
-      // 2. Subscribe to Private Channel (for incoming signals)
       privateChannelRef.current = pusherRef.current.subscribe(`private-user-${selfId}`);
 
       privateChannelRef.current.bind('offer', async ({ from, signal: offer }) => {
-        console.log('📩 Received offer from:', from);
         const pc = createPeerConnection(from);
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         const answer = await pc.createAnswer();
@@ -313,7 +339,6 @@ const App = () => {
       });
 
       privateChannelRef.current.bind('answer', async ({ from, signal: answer }) => {
-        console.log('📩 Received answer from:', from);
         const pc = peersRef.current[from];
         if (pc) {
           await pc.setRemoteDescription(new RTCSessionDescription(answer));
@@ -322,19 +347,16 @@ const App = () => {
       });
 
       privateChannelRef.current.bind('ice-candidate', async ({ from, signal: candidate }) => {
-        console.log('🧊 Received ICE candidate from:', from);
         const pc = peersRef.current[from];
         if (pc && pc.remoteDescription) {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
         } else {
-          console.log('⏳ Remote description not set, queueing ICE candidate');
           if (!iceQueueRef.current[from]) iceQueueRef.current[from] = [];
           iceQueueRef.current[from].push(candidate);
         }
       });
 
     } catch (err) {
-      console.error('Error accessing media/joining:', err);
       if (err.message === 'Invalid PIN for room creation') {
         setError('Invalid PIN. You need the correct secret PIN to create a new room.');
       } else {
@@ -366,7 +388,6 @@ const App = () => {
         screenStreamRef.current = screenStream;
         const screenTrack = screenStream.getVideoTracks()[0];
 
-        // Replace track for all peers
         Object.values(peersRef.current).forEach(pc => {
           const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
           if (sender) sender.replaceTrack(screenTrack);
@@ -376,9 +397,7 @@ const App = () => {
         setStream(new MediaStream([screenTrack, streamRef.current.getAudioTracks()[0]]));
 
         screenTrack.onended = () => stopScreenSharing();
-      } catch (err) {
-        console.error('Error sharing screen:', err);
-      }
+      } catch (err) {}
     } else {
       stopScreenSharing();
     }
@@ -430,11 +449,7 @@ const App = () => {
               <p>{isInvited ? 'You have been invited' : 'Create a room to start talking'}</p>
             </div>
 
-            {error && (
-              <div className="error-alert">
-                {error}
-              </div>
-            )}
+            {error && <div className="error-alert">{error}</div>}
 
             {isInvited ? (
               <div className="invited-container">
@@ -506,15 +521,9 @@ const App = () => {
                           </div>
                           <button className="btn btn-secondary btn-copy" onClick={handleCopyLink}>
                             {copied ? (
-                              <>
-                                <Check size={18} color="#10b981" />
-                                <span>Copied!</span>
-                              </>
+                              <><Check size={18} color="#10b981" /><span>Copied!</span></>
                             ) : (
-                              <>
-                                <Copy size={18} />
-                                <span>Copy Link</span>
-                              </>
+                              <><Copy size={18} /><span>Copy Link</span></>
                             )}
                           </button>
                         </div>
@@ -523,7 +532,7 @@ const App = () => {
 
                     <button 
                       className="btn btn-primary" 
-                      style={{ width: '100%', marginTop: '1rem' }} 
+                       style={{ width: '100%', marginTop: '1rem' }} 
                       onClick={joinRoom}
                     >
                       Create & Join
@@ -538,52 +547,100 @@ const App = () => {
             key="call"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="call-screen"
+            className={`call-screen ${showChat ? 'with-chat' : ''}`}
           >
-            <div className="room-info-badge glass" onClick={() => setShowQR(true)}>
-              <Share2 size={16} />
-              <span>Room: {roomId}</span>
-              <div className="participant-count">
-                {Object.keys(peers).length + 1} / {MAX_PARTICIPANTS} users
-              </div>
-              {Object.keys(peers).length === 0 && (
-                <div className="solitude-warning">
-                  Closing in {timeRemaining}s
+            <div className="main-call-area">
+              <div className="room-info-badge glass" onClick={() => setShowQR(true)}>
+                <Share2 size={16} />
+                <span>Room: {roomId}</span>
+                <div className="participant-count">
+                  {Object.keys(peers).length + 1} / {MAX_PARTICIPANTS} users
                 </div>
+                {Object.keys(peers).length === 0 && (
+                  <div className="solitude-warning">
+                    Closing in {timeRemaining}s
+                  </div>
+                )}
+                <Check size={14} style={{ opacity: copied ? 1 : 0, color: "#10b981" }} />
+              </div>
+
+              <div className="video-container">
+                <div className="video-wrapper glass">
+                  <VideoPlayer stream={stream} muted={true} />
+                  <div className="video-label">You {isVideoOff && '(Video Off)'}</div>
+                </div>
+                
+                {Object.entries(peers).map(([id, remoteStream]) => (
+                  <div key={id} className="video-wrapper glass">
+                    <VideoPlayer stream={remoteStream} />
+                    <div className="video-label">User {id.slice(0, 4)}</div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="controls glass">
+                <button className={`btn ${isMuted ? 'btn-danger' : 'btn-secondary'}`} onClick={toggleMute}>
+                  {isMuted ? <MicOff /> : <Mic />}
+                </button>
+                <button className={`btn ${isVideoOff ? 'btn-danger' : 'btn-secondary'}`} onClick={toggleVideo} disabled={isScreenSharing}>
+                  {isVideoOff ? <CameraOff /> : <Camera />}
+                </button>
+                <button className={`btn ${isScreenSharing ? 'btn-primary active' : 'btn-secondary'}`} onClick={toggleScreenSharing}>
+                  <Monitor />
+                </button>
+                <button className={`btn ${showChat ? 'btn-primary active' : 'btn-secondary'}`} onClick={() => setShowChat(!showChat)}>
+                  <MessageSquare />
+                </button>
+                <button className="btn btn-danger" onClick={leaveCall}>
+                  <PhoneOff />
+                </button>
+              </div>
+
+            </div>
+            
+            {/* Chat Sidebar Overlay for Local Messaging */}
+            <AnimatePresence>
+              {showChat && (
+                <motion.div 
+                  initial={{ x: 300, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  exit={{ x: 300, opacity: 0 }}
+                  className="chat-sidebar glass"
+                >
+                  <div className="chat-header">
+                    <h3>Chat</h3>
+                    <button className="btn-icon" onClick={() => setShowChat(false)} style={{width: '32px', height: '32px'}}>
+                      <Check size={14} />
+                    </button>
+                  </div>
+                  <div className="chat-messages">
+                    {messages.map((msg, idx) => {
+                      // Just compare sender IDs to determine "me"
+                      const isMe = msg.sender === pusherRef.current?.connection?.socket_id;
+                      return (
+                        <div key={idx} className={`message-bubble ${isMe ? 'me' : 'them'}`}>
+                          <div className="sender">{isMe ? 'You' : `User ${msg.sender.slice(0,4)}`}</div>
+                          <div className="text">{msg.content}</div>
+                          <div className="time">{new Date(msg.timestamp).toLocaleTimeString([], {timeStyle: 'short'})}</div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <form className="chat-input-area" onSubmit={sendChatMessage}>
+                    <input 
+                      type="text" 
+                      placeholder="Type a message..." 
+                      value={chatInput}
+                      onChange={e => setChatInput(e.target.value)}
+                    />
+                    <button type="submit" className="btn btn-primary" style={{width: 'auto', padding: '0 16px', height: '100%', borderRadius: '12px'}}>
+                      Send
+                    </button>
+                  </form>
+                </motion.div>
               )}
-              <Check size={14} style={{ opacity: copied ? 1 : 0, color: "#10b981" }} />
-            </div>
+            </AnimatePresence>
 
-            <div className="video-container">
-              <div className="video-wrapper glass">
-                <VideoPlayer stream={stream} muted={true} />
-                <div className="video-label">You {isVideoOff && '(Video Off)'}</div>
-              </div>
-              
-              {Object.entries(peers).map(([id, remoteStream]) => (
-                <div key={id} className="video-wrapper glass">
-                  <VideoPlayer stream={remoteStream} />
-                  <div className="video-label">User {id.slice(0, 4)}</div>
-                </div>
-              ))}
-            </div>
-
-            <div className="controls glass">
-              <button className={`btn ${isMuted ? 'btn-danger' : 'btn-secondary'}`} onClick={toggleMute}>
-                {isMuted ? <MicOff /> : <Mic />}
-              </button>
-              <button className={`btn ${isVideoOff ? 'btn-danger' : 'btn-secondary'}`} onClick={toggleVideo} disabled={isScreenSharing}>
-                {isVideoOff ? <CameraOff /> : <Camera />}
-              </button>
-              <button className={`btn ${isScreenSharing ? 'btn-primary active' : 'btn-secondary'}`} onClick={toggleScreenSharing}>
-                <Monitor />
-              </button>
-              <button className="btn btn-danger" onClick={leaveCall}>
-                <PhoneOff />
-              </button>
-            </div>
-
-            {/* QR Code Sharing Modal */}
             <AnimatePresence>
               {showQR && (
                 <motion.div 
@@ -639,13 +696,9 @@ const App = () => {
 
 const VideoPlayer = ({ stream, muted = false }) => {
   const videoRef = useRef();
-
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-    }
+    if (videoRef.current && stream) videoRef.current.srcObject = stream;
   }, [stream]);
-
   return <video ref={videoRef} autoPlay playsInline muted={muted} />;
 };
 
