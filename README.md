@@ -10,26 +10,26 @@ For real-time text chat, it bypasses the signaling layer entirely, leveraging **
 
 ```mermaid
 graph TD
-    Client1[Client A <br>React WebRTC]
-    Client2[Client B <br>React WebRTC]
+    Client1["Client A <br>React WebRTC"]
+    Client2["Client B <br>React WebRTC"]
     
-    Server[Signaling Server <br>Node.js & Express]
-    Pusher[Pusher Channels <br>WebSockets/PubSub]
-    STUN[STUN Server <br>Google Public STUN]
-    DuckDB[DuckDB WASM <br>Browser Web Worker]
+    Server["Signaling Server <br>Node.js & Express"]
+    Pusher["Pusher Channels <br>WebSockets/PubSub"]
+    STUN["STUN Server <br>Google Public STUN"]
+    DuckDB["DuckDB WASM <br>Browser Web Worker"]
     
-    Client1 <-->|1. Auth & HTTP POST<br>Send Signal| Server
-    Server -->|2. Trigger Events API| Pusher
-    Pusher -->|3. Deliver Event via WSS| Client2
+    Client1 <-->|"1. Auth & HTTP POST<br>Send Signal"| Server
+    Server -->|"2. Trigger Events API"| Pusher
+    Pusher -->|"3. Deliver Event via WSS"| Client2
     
-    Client1 <-->|Discover Public IP/Port| STUN
-    Client2 <-->|Discover Public IP/Port| STUN
+    Client1 <-->|"Discover Public IP/Port"| STUN
+    Client2 <-->|"Discover Public IP/Port"| STUN
     
-    Client1 <=====>|4. Direct P2P Media Stream <br> Video & Audio| Client2
-    Client1 <.====.>|5. RTCDataChannel <br> P2P Chat| Client2
+    Client1 ===|"4. Direct P2P Stream <br> Video & Audio"| Client2
+    Client1 -.-|"5. RTCDataChannel <br> P2P Chat"| Client2
     
-    Client1 <--> |6. saveMessage / getMessages| DuckDB
-    Client2 <--> |6. saveMessage / getMessages| DuckDB
+    Client1 <--> |"6. saveMessage/getMessages"| DuckDB
+    Client2 <--> |"6. saveMessage/getMessages"| DuckDB
     
     classDef client fill:#3b82f6,stroke:#1d4ed8,stroke-width:2px,color:#fff;
     classDef server fill:#10b981,stroke:#047857,stroke-width:2px,color:#fff;
