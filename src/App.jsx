@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Pusher from 'pusher-js';
-import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check, Monitor, MessageSquare } from 'lucide-react';
+import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check, Monitor, MessageSquare, Clock, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QRCode } from 'react-qr-code';
-import { initDB, saveMessageLocally, getMessagesLocally } from './db.js';
+import { initDB, saveMessageLocally, getMessagesLocally, clearHistory } from './db.js';
 
 
 const SIGNAL_SERVER = '';
@@ -45,6 +45,7 @@ const App = () => {
   const [showChat, setShowChat] = useState(false);
   const [messages, setMessages] = useState([]);
   const [chatInput, setChatInput] = useState('');
+  const [isHistoryMode, setIsHistoryMode] = useState(false);
 
   const pusherRef = useRef();
   const channelRef = useRef();
@@ -59,9 +60,8 @@ const App = () => {
   useEffect(() => {
     // Initialize DuckDB WASM on mount
     initDB().then(() => {
-      getMessagesLocally().then(savedMsgs => {
-        if(savedMsgs.length > 0) setMessages(savedMsgs);
-      });
+      // Don't load anything yet, wait for room join to load room-specific msgs
+      // or load global history if desired. For now, just init.
     });
 
     const urlParams = new URLSearchParams(window.location.search);
@@ -169,7 +169,7 @@ const App = () => {
   const handleDataChannelMessage = (event) => {
     const data = JSON.parse(event.data);
     setMessages(prev => [...prev, data]);
-    saveMessageLocally(data.id, data.sender, data.content, data.timestamp);
+    saveMessageLocally(data.id, data.sender, data.content, data.timestamp, roomId);
   };
 
   const createPeerConnection = (userId) => {
@@ -299,7 +299,7 @@ const App = () => {
     });
 
     setMessages(prev => [...prev, msg]);
-    saveMessageLocally(msg.id, msg.sender, msg.content, msg.timestamp);
+    saveMessageLocally(msg.id, msg.sender, msg.content, msg.timestamp, roomId);
     setChatInput('');
   };
 
@@ -308,6 +308,11 @@ const App = () => {
     if (!trimmedId) return;
     
     setError('');
+    // Load room history upon joining
+    getMessagesLocally(roomId).then(savedMsgs => {
+      setMessages(savedMsgs);
+    });
+
     try {
       const userStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       setStream(userStream);
@@ -615,16 +620,53 @@ const App = () => {
                   exit={{ x: 300, opacity: 0 }}
                   className="chat-sidebar glass"
                 >
-                  <div className="chat-header">
-                    <h3>Chat</h3>
-                    <button 
-                      className="btn-icon" 
-                      onClick={() => setShowChat(false)} 
-                      style={{width: '36px', height: '36px', borderRadius: '50%'}}
-                      title="Close Chat"
-                    >
-                      <span style={{ fontSize: '20px', lineHeight: '1' }}>×</span>
-                    </button>
+                  <div className={`chat-header ${isHistoryMode ? 'history-active' : ''}`}>
+                    <h3>{isHistoryMode ? 'Global History' : 'Chat'}</h3>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      <button 
+                        className={`btn-icon ${isHistoryMode ? 'active' : ''}`} 
+                        onClick={async () => {
+                          const nextMode = !isHistoryMode;
+                          setIsHistoryMode(nextMode);
+                          if (nextMode) {
+                            const history = await getMessagesLocally(); // No param = all history
+                            setMessages(history);
+                          } else {
+                            const sessionMsgs = await getMessagesLocally(roomId);
+                            setMessages(sessionMsgs);
+                          }
+                        }}
+                        style={{width: '36px', height: '36px', borderRadius: '50%'}}
+                        title={isHistoryMode ? "Back to Session" : "View All History"}
+                      >
+                        <Clock size={18} color={isHistoryMode ? '#3b82f6' : 'currentColor'} />
+                      </button>
+                      
+                      {isHistoryMode && (
+                        <button 
+                          className="btn-icon" 
+                          onClick={async () => {
+                            if (window.confirm('Are you sure you want to PERMANENTLY delete ALL chat history from this machine?')) {
+                              await clearHistory();
+                              setMessages([]);
+                            }
+                          }}
+                          style={{width: '36px', height: '36px', borderRadius: '50%', color: '#ef4444'}}
+                          title="Clear All History"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      )}
+
+                      <button 
+                        className="btn-icon" 
+                        onClick={() => setShowChat(false)} 
+                        style={{width: '36px', height: '36px', borderRadius: '50%'}}
+                        title="Close Chat"
+                      >
+                        <span style={{ fontSize: '20px', lineHeight: '1' }}>×</span>
+                      </button>
+                    </div>
                   </div>
                   <div className="chat-messages">
                     {messages.map((msg, idx) => {
@@ -632,7 +674,12 @@ const App = () => {
                       const isMe = msg.sender === pusherRef.current?.connection?.socket_id;
                       return (
                         <div key={idx} className={`message-bubble ${isMe ? 'me' : 'them'}`}>
-                          <div className="sender">{isMe ? 'You' : `User ${msg.sender.slice(0,4)}`}</div>
+                          <div className="sender">
+                            {isMe ? 'You' : `User ${msg.sender.slice(0,4)}`}
+                            {isHistoryMode && msg.room_id && (
+                              <span className="room-tag"> in {msg.room_id}</span>
+                            )}
+                          </div>
                           <div className="text">{msg.content}</div>
                           <div className="time">{new Date(msg.timestamp).toLocaleTimeString([], {timeStyle: 'short'})}</div>
                         </div>
