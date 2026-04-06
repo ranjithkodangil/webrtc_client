@@ -54,6 +54,7 @@ const App = () => {
   const screenStreamRef = useRef();
   const peersRef = useRef({}); // { userId: RTCPeerConnection }
   const dataChannelsRef = useRef({}); // { userId: RTCDataChannel }
+  const chatEndRef = useRef(null);
 
   useEffect(() => {
     // Initialize DuckDB WASM on mount
@@ -114,6 +115,13 @@ const App = () => {
       if (pusherRef.current) pusherRef.current.disconnect();
     };
   }, []);
+
+  // Auto-scroll to bottom of chat
+  useEffect(() => {
+    if (showChat) {
+      chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages, showChat]);
 
   useEffect(() => {
     pinRef.current = pin;
@@ -609,8 +617,13 @@ const App = () => {
                 >
                   <div className="chat-header">
                     <h3>Chat</h3>
-                    <button className="btn-icon" onClick={() => setShowChat(false)} style={{width: '32px', height: '32px'}}>
-                      <Check size={14} />
+                    <button 
+                      className="btn-icon" 
+                      onClick={() => setShowChat(false)} 
+                      style={{width: '36px', height: '36px', borderRadius: '50%'}}
+                      title="Close Chat"
+                    >
+                      <span style={{ fontSize: '20px', lineHeight: '1' }}>×</span>
                     </button>
                   </div>
                   <div className="chat-messages">
@@ -625,6 +638,7 @@ const App = () => {
                         </div>
                       )
                     })}
+                    <div ref={chatEndRef} />
                   </div>
                   <form className="chat-input-area" onSubmit={sendChatMessage}>
                     <input 
