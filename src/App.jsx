@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Pusher from 'pusher-js';
-import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check, Monitor, MessageSquare, Clock, Trash2 } from 'lucide-react';
+import { Camera, CameraOff, Mic, MicOff, PhoneOff, Video, Share2, Copy, Check, Monitor, MessageSquare, Clock, Trash2, Circle, Square, Download, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QRCode } from 'react-qr-code';
 import { initDB, saveMessageLocally, getMessagesLocally, clearHistory } from './db.js';
@@ -40,6 +40,9 @@ const App = () => {
   const [pinError, setPinError] = useState('');
   const [saltedRoomId, setSaltedRoomId] = useState('');
   const [showQR, setShowQR] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [showRecordModal, setShowRecordModal] = useState(false);
+  const [recordingBlob, setRecordingBlob] = useState(null);
 
   // Chat state
   const [showChat, setShowChat] = useState(false);
@@ -56,6 +59,8 @@ const App = () => {
   const peersRef = useRef({}); // { userId: RTCPeerConnection }
   const dataChannelsRef = useRef({}); // { userId: RTCDataChannel }
   const chatEndRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const recordedChunksRef = useRef([]);
 
   useEffect(() => {
     // Initialize DuckDB WASM on mount
@@ -437,6 +442,65 @@ const App = () => {
     window.location.reload();
   };
 
+  const startRecording = () => {
+    if (!stream) return;
+    recordedChunksRef.current = [];
+    try {
+      const options = { mimeType: 'video/webm;codecs=vp9,opus' };
+      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options.mimeType = 'video/webm;codecs=vp8,opus';
+      }
+      
+      const mediaRecorder = new MediaRecorder(stream, options);
+      mediaRecorderRef.current = mediaRecorder;
+      
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          recordedChunksRef.current.push(event.data);
+        }
+      };
+      
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+        setRecordingBlob(blob);
+        setShowRecordModal(true);
+      };
+      
+      mediaRecorder.start();
+      setIsRecording(true);
+    } catch (err) {
+      console.error('Error starting recording:', err);
+      alert('Could not start recording. Your browser might not support it.');
+    }
+  };
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop();
+      setIsRecording(false);
+    }
+  };
+
+  const handleSaveRecording = () => {
+    if (!recordingBlob) return;
+    const url = URL.createObjectURL(recordingBlob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = `meeting-record-${Date.now()}.webm`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    setRecordingBlob(null);
+    setShowRecordModal(false);
+  };
+
+  const handleDiscardRecording = () => {
+    setRecordingBlob(null);
+    setShowRecordModal(false);
+    recordedChunksRef.current = [];
+  };
+
   const handleCopyLink = () => {
     const finalId = saltedRoomId || roomId;
     const shareUrl = `${window.location.origin}${window.location.pathname}?room=${finalId}`;
@@ -579,8 +643,12 @@ const App = () => {
 
               <div className="video-container">
                 <div className="video-wrapper glass">
-                  <VideoPlayer stream={stream} muted={true} />
-                  <div className="video-label">You {isVideoOff && '(Video Off)'}</div>
+                  <VideoPlayer stream={streamRef.current} muted={true} />
+                  <div className="video-label">
+                    You {isVideoOff && '(Video Off)'}
+                    {isScreenSharing && ' - Sharing Screen'}
+                  </div>
+                  {isScreenSharing && <div className="recording-indicator" style={{ top: '10px', right: '10px' }}></div>}
                 </div>
                 
                 {Object.entries(peers).map(([id, remoteStream]) => (
@@ -604,10 +672,24 @@ const App = () => {
                 <button className={`btn ${showChat ? 'btn-primary active' : 'btn-secondary'}`} onClick={() => setShowChat(!showChat)}>
                   <MessageSquare />
                 </button>
+                <button 
+                  className={`btn ${isRecording ? 'btn-recording' : 'btn-record'}`} 
+                  onClick={isRecording ? stopRecording : startRecording}
+                  title={isRecording ? 'Stop Recording' : 'Start Recording'}
+                >
+                  {isRecording ? <Square fill="white" /> : <Circle fill="currentColor" />}
+                </button>
                 <button className="btn btn-danger" onClick={leaveCall}>
                   <PhoneOff />
                 </button>
               </div>
+
+              {recordingBlob && !showRecordModal && (
+                <button className="recording-review-badge" onClick={() => setShowRecordModal(true)}>
+                  <Download size={16} />
+                  Recording Ready - Click to Save
+                </button>
+              )}
 
             </div>
             
@@ -742,6 +824,43 @@ const App = () => {
                       </button>
                       <button className="btn btn-danger" onClick={() => setShowQR(false)}>
                         Close
+                      </button>
+                    </div>
+                  </motion.div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {showRecordModal && (
+                <motion.div 
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="modal-overlay"
+                  onClick={() => setShowRecordModal(false)}
+                >
+                  <motion.div 
+                    initial={{ scale: 0.9, y: 20 }}
+                    animate={{ scale: 1, y: 0 }}
+                    exit={{ scale: 0.9, y: 20 }}
+                    className="modal-content glass"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="modal-header">
+                      <h3>Recording Complete</h3>
+                      <p>Do you want to save or discard this recording?</p>
+                    </div>
+
+                    <div className="modal-actions">
+                      <button className="btn btn-primary" onClick={handleSaveRecording} style={{ width: '100%' }}>
+                        <Download size={18} /> Save Recording
+                      </button>
+                      <button className="btn btn-secondary" onClick={handleDiscardRecording} style={{ width: '100%', color: '#ef4444' }}>
+                        <Trash2 size={18} /> Discard
+                      </button>
+                      <button className="btn-link" onClick={() => setShowRecordModal(false)}>
+                        Decide later
                       </button>
                     </div>
                   </motion.div>
